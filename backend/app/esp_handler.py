@@ -1,16 +1,11 @@
 """
 esp_handler.py
 --------------------------------
-Módulo encargado de gestionar la conexión WebSocket con la ESP32-CAM.
-
-Recibe frames JPEG desde el dispositivo, los decodifica y los envía
-al módulo de inferencia (simulado o real) para obtener una traducción
-del gesto detectado.
-
-Forma parte del backend del proyecto **SeñaVoz**.
+Gestión de la conexión WebSocket con la ESP32-CAM y registro de todas las acciones del Arduino.
 """
 
 import json
+from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.ws_manager import ConnectionManager
 from app.frames import decode_jpeg_bytes
@@ -19,21 +14,30 @@ from app.inference import infer_from_frame
 router = APIRouter()
 manager = ConnectionManager()
 
+# ───────────────────────────────
+# Logs de acciones del Arduino
+# ───────────────────────────────
+arduino_logs = []
 
+def log_arduino_event(device_id, event_type, data):
+    """Registra un evento del Arduino con timestamp."""
+    arduino_logs.append({
+        "timestamp": datetime.utcnow().isoformat(),
+        "device_id": device_id,
+        "event": event_type,
+        "data": data
+    })
+    print(f"[LOG] {device_id} | {event_type}: {data}")
+
+
+# ───────────────────────────────
+# WebSocket ESP32-CAM
+# ───────────────────────────────
 @router.websocket("/ws/esp32/{device_id}")
 async def esp32_ws(websocket: WebSocket, device_id: str):
     """
     Canal WebSocket entre la ESP32-CAM y el backend.
-
-    Args:
-        websocket (WebSocket): Conexión WebSocket activa.
-        device_id (str): Identificador único del dispositivo.
-
-    Función:
-        - Recibe frames JPEG desde la ESP32-CAM.
-        - Decodifica los bytes a imagen (usando OpenCV).
-        - Pasa la imagen al módulo de inferencia.
-        - Envía la traducción resultante a los clientes conectados.
+    Recibe frames o mensajes de texto y los registra.
     """
     await manager.connect_esp(device_id, websocket)
     try:
@@ -49,10 +53,23 @@ async def esp32_ws(websocket: WebSocket, device_id: str):
                 payload = {"type": "translation", "text": label, "confidence": conf}
                 await manager.broadcast_translation(device_id, payload)
 
+                # Registrar la acción
+                log_arduino_event(device_id, "frame_received", {"label": label, "confidence": conf})
+
             # Si el mensaje es texto → log simple
             elif "text" in msg:
                 print(f"[ESP32] Mensaje texto: {msg['text']}")
+                log_arduino_event(device_id, "text_message", {"text": msg["text"]})
 
     except WebSocketDisconnect:
         await manager.disconnect_esp(device_id)
         print(f"⚠️ ESP32 {device_id} desconectada.")
+
+
+# ───────────────────────────────
+# Endpoint REST para consultar logs
+# ───────────────────────────────
+@router.get("/logs")
+def get_logs():
+    """Devuelve todos los logs del Arduino registrados hasta el momento."""
+    return {"logs": arduino_logs}
